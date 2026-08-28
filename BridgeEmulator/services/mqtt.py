@@ -2,6 +2,7 @@ import logManager
 import configManager
 import json
 import math
+import importlib
 import weakref
 import ssl
 from HueObjects import Sensor
@@ -450,19 +451,198 @@ def on_message(client, userdata, msg):
                     elif device.getObjectPath()["resource"] == "lights":
                         state = {"reachable": True}
                         v2State = {}
+
+                        # Candle/Fire is emulated by repeatedly changing
+                        # the physical IKEA brightness. Do not mirror
+                        # those internal animation frames into Hue's
+                        # eventstream. A real Hue lamp performs that
+                        # animation locally as well.
+                        try:
+                            protocol_mqtt = importlib.import_module(
+                                "lights.protocols.mqtt"
+                            )
+
+                            effect_feedback = (
+                                protocol_mqtt
+                                ._is_emulated_effect_feedback(
+                                    device.protocol_cfg[
+                                        "command_topic"
+                                    ],
+                                    data
+                                )
+                            )
+                        except Exception:
+                            effect_feedback = False
+
+                        if effect_feedback:
+                            on_state_update(msg)
+                            return
+
                         if "state" in data:
-                            if data["state"] == "ON":
-                                state["on"] = True
-                            else:
-                                state["on"] = False
-                            v2State.update({"on":{"on": state["on"]}})
-                            device.genStreamEvent(v2State)
+                            state["on"] = data["state"] == "ON"
+                            v2State["on"] = {
+                                "on": state["on"]
+                            }
+
+                            # An OFF reported by Zigbee2MQTT may come
+                            # from Home Assistant or another external
+                            # controller and therefore never passes
+                            # through Light.setV1State/setV2State.
+                            #
+                            # Stop every local animation immediately,
+                            # otherwise its next frame can wake the
+                            # physical lamp again.
+                            if state["on"] is False:
+                                device.dynamics["status"] = "none"
+
+                                try:
+                                    protocol_mqtt = importlib.import_module(
+                                        "lights.protocols.mqtt"
+                                    )
+
+                                    protocol_mqtt._stop_emulated_effect(
+                                        device.protocol_cfg[
+                                            "command_topic"
+                                        ]
+                                    )
+
+                                except Exception as e:
+                                    logging.warning(
+                                        "MQTT external OFF effect-stop "
+                                        "failed for %s: %s",
+                                        device.name,
+                                        e,
+                                    )
+
                         if "brightness" in data:
                             state["bri"] = data["brightness"]
-                            v2State.update({"dimming": {"brightness": round(state["bri"] / 2.54, 2)}})
-                            device.genStreamEvent(v2State)
+                            v2State["dimming"] = {
+                                "brightness": round(
+                                    state["bri"] / 2.54,
+                                    2
+                                )
+                            }
+
+                        # Zigbee2MQTT may publish BOTH a cached XY
+                        # colour and a cached color_temp in the same
+                        # payload. color_mode tells us which one is
+                        # actually active.
+                        color_mode = data.get("color_mode")
+
+                        has_xy = (
+                            "color" in data
+                            and isinstance(data["color"], dict)
+                            and "x" in data["color"]
+                            and "y" in data["color"]
+                        )
+
+                        has_ct = (
+                            "color_temp" in data
+                            and data["color_temp"] is not None
+                        )
+
+                        if color_mode in ("xy", "hs"):
+                            if has_xy:
+                                x = float(data["color"]["x"])
+                                y = float(data["color"]["y"])
+
+                                state["xy"] = [x, y]
+                                state["colormode"] = "xy"
+
+                                v2State["color"] = {
+                                    "xy": {
+                                        "x": x,
+                                        "y": y
+                                    }
+                                }
+
+                        elif color_mode in ("color_temp", "ct"):
+                            if has_ct:
+                                state["ct"] = int(
+                                    data["color_temp"]
+                                )
+                                state["colormode"] = "ct"
+
+                                v2State[
+                                    "color_temperature"
+                                ] = {
+                                    "mirek": state["ct"]
+                                }
+
+                        else:
+                            # Fallback for devices/old Z2M payloads
+                            # without color_mode.
+                            if has_xy and not has_ct:
+                                x = float(data["color"]["x"])
+                                y = float(data["color"]["y"])
+
+                                state["xy"] = [x, y]
+                                state["colormode"] = "xy"
+
+                                v2State["color"] = {
+                                    "xy": {
+                                        "x": x,
+                                        "y": y
+                                    }
+                                }
+
+                            elif has_ct and not has_xy:
+                                state["ct"] = int(
+                                    data["color_temp"]
+                                )
+                                state["colormode"] = "ct"
+
+                                v2State[
+                                    "color_temperature"
+                                ] = {
+                                    "mirek": state["ct"]
+                                }
+
+                            elif has_xy and has_ct:
+                                # Ambiguous legacy payload: preserve
+                                # current mode if known.
+                                if (
+                                    device.state.get(
+                                        "colormode"
+                                    ) == "ct"
+                                ):
+                                    state["ct"] = int(
+                                        data["color_temp"]
+                                    )
+
+                                    v2State[
+                                        "color_temperature"
+                                    ] = {
+                                        "mirek": state["ct"]
+                                    }
+
+                                else:
+                                    x = float(
+                                        data["color"]["x"]
+                                    )
+                                    y = float(
+                                        data["color"]["y"]
+                                    )
+
+                                    state["xy"] = [x, y]
+                                    state["colormode"] = "xy"
+
+                                    v2State["color"] = {
+                                        "xy": {
+                                            "x": x,
+                                            "y": y
+                                        }
+                                    }
+
+                        if "xy" in state or "ct" in state:
+                            device.updateLightState(state)
+
                         device.state.update(state)
-                        streamGroupEvent(device, v2State)
+
+                        # One complete V2 event for the incoming Z2M state.
+                        if v2State:
+                            device.genStreamEvent(v2State)
+                            streamGroupEvent(device, v2State)
 
                 on_state_update(msg)
         except Exception as e:

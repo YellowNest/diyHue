@@ -5,8 +5,34 @@ import random
 logging = logManager.logger.get_logger(__name__)
 
 eventstream = []
+_eventstream_seq = 0
+
+from threading import Lock
+_eventstream_lock = Lock()
+
 def StreamEvent(message):
-    eventstream.append(message)
+    global _eventstream_seq
+
+    with _eventstream_lock:
+        _eventstream_seq += 1
+        eventstream.append((_eventstream_seq, message))
+
+        # Keep a bounded history so slow clients can catch up
+        # without allowing memory usage to grow forever.
+        if len(eventstream) > 2000:
+            del eventstream[:-2000]
+
+def EventStreamSequence():
+    with _eventstream_lock:
+        return _eventstream_seq
+
+def EventStreamSnapshot(after_seq):
+    with _eventstream_lock:
+        return [
+            (seq, message)
+            for seq, message in eventstream
+            if seq > after_seq
+        ]
 
 def v1StateToV2(v1State):
     v2State = {}

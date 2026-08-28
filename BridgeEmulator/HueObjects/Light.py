@@ -215,12 +215,27 @@ class Light():
         streamMessage["data"][0].update({"owner": {"rid": self.getDevice()["id"], "rtype": "device"}})
         streamMessage["data"][0].update({"service_id": self.protocol_cfg["light_nr"]-1 if "light_nr" in self.protocol_cfg else 0})
         StreamEvent(streamMessage)
-        streamMessage = {"creationtime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                         "data": [self.getDevice()],
-                         "id": str(uuid.uuid4()),
-                         "type": "update"
-                         }
-        StreamEvent(streamMessage)
+
+        # Normal light state changes (on/off, dimming, colour,
+        # temperature, effects, dynamics) belong to the light
+        # resource only.
+        #
+        # Sending the complete device resource after every MQTT
+        # brightness report creates a large amount of redundant SSE
+        # traffic and can overwhelm Hue clients.
+        #
+        # Device metadata still needs its own update when metadata
+        # actually changes.
+        if "metadata" in v2State:
+            deviceMessage = {
+                "creationtime": datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "data": [self.getDevice()],
+                "id": str(uuid.uuid4()),
+                "type": "update"
+            }
+            StreamEvent(deviceMessage)
 
     def getDevice(self):
         result = {"id": str(uuid.uuid5(
