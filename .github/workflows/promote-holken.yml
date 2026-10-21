@@ -1,0 +1,59 @@
+name: Promote verified holken candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_digest:
+        description: Immutable GHCR digest already verified with the live configuration
+        type: string
+        required: true
+      confirm_api_checks:
+        description: Confirm identity, credentials, persistent data and API checks passed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    if: inputs.confirm_api_checks
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require successful candidate CI before moving stable
+        env:
+          CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          image = 'ghcr.io/yellownest/diyhue-holken'
+          digest = os.environ['CANDIDATE_DIGEST']
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest), 'Invalid digest'
+          candidate = image + '@' + digest
+          subprocess.run(['docker', 'pull', '--platform', 'linux/arm64', candidate], check=True)
+          config = json.loads(subprocess.check_output(['docker', 'image', 'inspect', candidate]))[0]
+          revision = config['Config']['Labels']['org.opencontainers.image.revision']
+          assert re.fullmatch(r'[0-9a-f]{40}', revision), 'Invalid source revision'
+          assert config['Architecture'] == 'arm64', 'Unexpected platform'
+          runs = json.loads(subprocess.check_output([
+              'gh', 'api', 'repos/' + os.environ['GH_REPO'] +
+              '/actions/workflows/holken-image.yml/runs?per_page=100'
+          ]))['workflow_runs']
+          assert any(r['head_sha'] == revision and r['conclusion'] == 'success'
+                     for r in runs), 'No successful candidate CI for this revision'
+          subprocess.run(['docker', 'buildx', 'imagetools', 'create',
+                          '--prefer-index=false', '--tag', image + ':stable', candidate], check=True)
+          print('Promoted verified revision', revision, 'from', digest)
+          PY

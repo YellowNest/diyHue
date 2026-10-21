@@ -36,6 +36,11 @@ publish a tested candidate as
 No `stable` tag is published automatically. The inherited unrestricted
 Docker release workflow is disabled in this fork.
 
+`Promote verified holken candidate` moves `stable` only when an operator supplies
+an immutable candidate digest, confirms the live API/data checks, and that
+candidate's exact source revision has successful validation CI. It promotes
+the existing manifest without rebuilding or changing application code.
+
 After candidate CI, test a copy of the real configuration with `--network none`,
 no published ports and a separate writable config directory. Verify V1/V2
 resource IDs, counts, names, scene actions, application-key authentication and
