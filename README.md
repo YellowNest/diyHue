@@ -1,3 +1,9 @@
+# holken production branch
+
+This branch contains the verified holken application source. Read
+[HOLKEN.md](HOLKEN.md) before building or deploying. Runtime data and credentials
+are deliberately excluded. Upstream tracking branches are `master` and `dev`.
+
 # diyHue - A Hue Bridge Emulator
 [![Discourse](https://img.shields.io/discourse/users?server=https%3A%2F%2Fdiyhue.discourse.group)](https://diyhue.discourse.group) [![JoinSlack](https://img.shields.io/badge/Join%20us-on%20Slack-green.svg)](https://diyhue.slack.com/)  [![Build Status](https://github.com/diyhue/diyHue/workflows/diyHue%20CI%20Build/badge.svg)](https://github.com/diyhue/diyHue/actions)
 
@@ -239,9 +245,3 @@ Hue living color light project for 3D printing: [Thingiverse 2773413](https://ww
 ## License
 
 [![license](https://img.shields.io/badge/license-GPLv3%2FApache%202.0%2FCC%20BY--SA%204.0-blue.svg)](https://github.com/diyhue/diyHue/blob/master/LICENSE.md)
-# holken production branch
-
-This branch contains the verified holken application source. Read
-[HOLKEN.md](HOLKEN.md) before building or deploying. Runtime data and credentials
-are deliberately excluded. Upstream tracking branches are `master` and `dev`.
-
