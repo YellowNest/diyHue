@@ -52,6 +52,9 @@ def streamV2Events():
                 last_seq = int(
                     last_event_id.rsplit(":", 1)[1]
                 )
+                # A restarted process has a new in-memory sequence history.
+                if last_seq > HueObjects.EventStreamSequence():
+                    last_seq = 0
             except (
                 TypeError,
                 ValueError,

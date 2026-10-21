@@ -79,7 +79,7 @@
   "services/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "services/deconz.py": "3c507d1934a8e6829281bd75294978b706564083cb947fd1ae83eb657988c972",
   "services/entertainment.py": "8e88bec1f9f4cdd8799db61b66428177a0d47a06c00eb0d8a602f29290176bb4",
-  "services/eventStreamer.py": "25653210106ccd8bed1dd967f10b0986e8f3a5372af0a95e1543cb784d5377cd",
+  "services/eventStreamer.py": "316252a8c7285a0edda2ea0d8e2193d3a86237cdfdb691ca5b2abb86bbf8d661",
   "services/homeAssistantWS.py": "140569f7ff930eb8515b04a03f7cb915f07244820313dcb127e0c00a054e0294",
   "services/mdns.py": "ec5564b63e373e36a5a718385c778fad2f231d1c9bbcbb4b16cc4a1e6277a5b4",
   "services/mqtt.py": "4298362c25ee0a4a23ec50f9a1b1861d3e8fbac379c3e304db298f4f69eec18c",

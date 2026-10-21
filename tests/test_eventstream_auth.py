@@ -85,6 +85,30 @@ class EventStreamAuthTests(unittest.TestCase):
         finally:
             response.close()
 
+    def _assert_retained_event_is_delivered(self, last_event_id):
+        event = {"type": "update", "data": [{"id": "test-light", "type": "light"}]}
+        self.event_streamer.HueObjects.EventStreamSequence.return_value = 1
+        self.event_streamer.HueObjects.EventStreamSnapshot.side_effect = (
+            lambda after: [(1, event)] if after < 1 else []
+        )
+        with patch.object(self.event_streamer, "sleep", side_effect=AssertionError("Event delivery stalled")):
+            response = self.client.get(
+                "/eventstream/clip/v2",
+                headers={"hue-application-key": "valid-application-key", "Last-Event-ID": last_event_id},
+                buffered=False,
+            )
+            try:
+                self.assertEqual(next(response.response), b": hi\n\n")
+                self.assertIn(b'"id":"test-light"', next(response.response))
+            finally:
+                response.close()
+
+    def test_event_stream_replays_after_process_sequence_reset(self):
+        self._assert_retained_event_is_delivered("100:9999")
+
+    def test_event_stream_resumes_existing_process_sequence(self):
+        self._assert_retained_event_is_delivered("100:0")
+
 
 if __name__ == "__main__":
     unittest.main()
