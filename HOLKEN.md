@@ -10,6 +10,10 @@ verified runtime. `runtime-source-sha256.json` records that baseline;
 `runtime-dependencies.json` records the installed dependency versions.
 Intentional application updates must update the source manifest after review.
 
+The first reviewed update backports upstream #1136 event-stream authentication
+without changing the local resumable event transport. Existing application
+keys remain valid; missing or invalid keys receive HTTP 403.
+
 ## Image and persistent data
 
 Build with `.build/Dockerfile.holken` for `linux/arm64`. The immutable official

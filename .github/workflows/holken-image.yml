@@ -26,7 +26,7 @@ jobs:
           python-version: '3.13'
       - name: Verify source and syntax
         run: |
-          python -m unittest discover -s tests -v
+          python -m unittest discover -s tests -p test_runtime_source.py -v
           python -m compileall -q BridgeEmulator
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -42,6 +42,9 @@ jobs:
           build-args: SOURCE_REVISION=${{ github.sha }}
       - name: Check packaged source and dependencies without network access
         run: |
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            --mount type=bind,src="$PWD",dst=/src,readonly --workdir /tmp \
+            --entrypoint python3 diyhue-holken:test -B -m unittest discover -s /src/tests -v
           docker run --rm --network none --entrypoint python3 diyhue-holken:test -c '
           import hashlib, importlib.metadata, json, pathlib
           root = pathlib.Path("/opt/hue-emulator")

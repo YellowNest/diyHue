@@ -1,4 +1,6 @@
 import logManager
+import configManager
+from datetime import datetime, timezone
 from flask import (
     Response,
     stream_with_context,
@@ -10,7 +12,18 @@ from time import sleep, time
 import HueObjects
 
 logging = logManager.logger.get_logger(__name__)
+bridgeConfig = configManager.bridgeConfig.yaml_config
 stream = Blueprint("stream", __name__)
+
+
+def _authorizeEventStream(headers):
+    application_key = headers.get("hue-application-key")
+    if application_key and application_key in bridgeConfig["apiUsers"]:
+        bridgeConfig["apiUsers"][application_key].last_use_date = (
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        )
+        return True
+    return False
 
 
 def messageBroker():
@@ -21,6 +34,8 @@ def messageBroker():
 
 @stream.route("/eventstream/clip/v2")
 def streamV2Events():
+    if not _authorizeEventStream(request.headers):
+        return "", 403
 
     def generate():
         last_event_id = request.headers.get(
