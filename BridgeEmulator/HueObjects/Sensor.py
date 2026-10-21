@@ -154,6 +154,60 @@ class Sensor():
                     "rtype": "temperature"
                 }]
             result["type"] = "device"
+        elif self.modelid == "DS01" and self.type == "ZHAOpenClose":
+            result = {
+                "id": self.id_v2,
+                "id_v1": "/sensors/" + self.id_v1,
+                "type": "device"
+            }
+            result["identify"] = {}
+            result["metadata"] = {
+                "archetype": "unknown_archetype",
+                "name": self.name
+            }
+            result["product_data"] = {
+                "certified": False,
+                "manufacturer_name": self.manufacturername or "SONOFF",
+                "model_id": self.modelid,
+                "product_archetype": "unknown_archetype",
+                "product_name": (
+                    self.protocol_cfg.get("model")
+                    or "SONOFF contact sensor"
+                ),
+                "software_version": str(
+                    self.swversion or "0.0.0"
+                )
+            }
+
+            result["services"] = [
+                {
+                    "rid": str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        self.id_v2 + "contact"
+                    )),
+                    "rtype": "contact"
+                },
+                {
+                    "rid": str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        self.id_v2 + "zigbee_connectivity"
+                    )),
+                    "rtype": "zigbee_connectivity"
+                }
+            ]
+
+            if "battery" in self.config:
+                result["services"].insert(
+                    1,
+                    {
+                        "rid": str(uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            self.id_v2 + "device_power"
+                        )),
+                        "rtype": "device_power"
+                    }
+                )
+
         elif self.modelid == "RWL022" or self.modelid == "RWL021" or self.modelid == "RWL020":
             result = {"id": self.id_v2, "id_v1": "/sensors/" + self.id_v1, "type": "device"}
             result["identify"] = {}
@@ -231,6 +285,47 @@ class Sensor():
             pass  # ZLLRelativeRotary is part of the ZLLSwitch device, not a separate device
         return result
 
+    def getContact(self):
+        if (
+            self.modelid != "DS01"
+            or self.type != "ZHAOpenClose"
+        ):
+            return None
+
+        changed = self.state.get("lastupdated")
+
+        if (
+            not isinstance(changed, str)
+            or not changed
+            or changed.lower() == "none"
+        ):
+            changed = "1970-01-01T00:00:00Z"
+
+        return {
+            "id": str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                self.id_v2 + "contact"
+            )),
+            "id_v1": "/sensors/" + self.id_v1,
+            "owner": {
+                "rid": self.id_v2,
+                "rtype": "device"
+            },
+            "enabled": bool(
+                self.config.get("on", True)
+            ),
+            "contact_report": {
+                "changed": changed,
+                "state": (
+                    "no_contact"
+                    if bool(self.state.get("open", False))
+                    else "contact"
+                )
+            },
+            "type": "contact"
+        }
+
+
     def getMotion(self):
         result = None
         if self.modelid == "SML001" and self.type == "ZLLPresence":
@@ -302,6 +397,13 @@ class Sensor():
             return None
         if self.type == "ZLLRelativeRotary":
             return None
+
+        # V2 services require an actual V2 device owner.
+        # Generic MQTT sensors are currently V1-only, so do
+        # not expose orphan zigbee_connectivity resources.
+        if self.getDevice() is None:
+            return None
+
         if not self.uniqueid:
             return None
         result = {}
@@ -393,6 +495,13 @@ class Sensor():
         result = None
         if self.type == "ZLLRelativeRotary":
             return None
+
+        # device_power belongs to a V2 device. Generic MQTT
+        # sensors are intentionally V1-only until a complete
+        # device/service/owner model is implemented.
+        if self.getDevice() is None:
+            return None
+
         if "battery" in self.config:
             result = {
                 "id": str(uuid.uuid5(
@@ -410,6 +519,52 @@ class Sensor():
                     "battery_state": "normal"
                     })
         return result
+
+    def genContactStreamEvent(self):
+        contact = self.getContact()
+
+        if contact is None:
+            return
+
+        StreamEvent({
+            "creationtime": datetime.now(
+                timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "data": [contact],
+            "id": str(uuid.uuid4()),
+            "type": "update"
+        })
+
+    def genZigBeeStreamEvent(self):
+        zigbee = self.getZigBee()
+
+        if zigbee is None:
+            return
+
+        StreamEvent({
+            "creationtime": datetime.now(
+                timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "data": [zigbee],
+            "id": str(uuid.uuid4()),
+            "type": "update"
+        })
+
+    def genDevicePowerStreamEvent(self):
+        power = self.getDevicePower()
+
+        if power is None:
+            return
+
+        StreamEvent({
+            "creationtime": datetime.now(
+                timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "data": [power],
+            "id": str(uuid.uuid4()),
+            "type": "update"
+        })
+
 
     def update_attr(self, newdata):
         if self.id_v1 == "1" and "config" in newdata:  # manage daylight sensor

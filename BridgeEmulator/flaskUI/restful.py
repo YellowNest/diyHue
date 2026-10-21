@@ -25,6 +25,11 @@ logging = logManager.logger.get_logger(__name__)
 
 bridgeConfig = configManager.bridgeConfig.yaml_config
 
+BRIDGE_PRO = os.getenv("BRIDGE_PROFILE", "").lower() == "pro"
+BRIDGE_MODEL_ID = "BSB003" if BRIDGE_PRO else "BSB002"
+BRIDGE_SWVERSION = "2071442000" if BRIDGE_PRO else None
+BRIDGE_APIVERSION = "1.78.0" if BRIDGE_PRO else None
+
 def GroupZeroMessage():
     rooms = []
     lights = []
@@ -57,6 +62,10 @@ def buildConfig():
     result.update({"Hue Essentials key": config["Hue Essentials key"], "Remote API enabled": config["Remote API enabled"], "apiversion": config["apiversion"], "bridgeid": config["bridgeid"],
                    "ipaddress": config["ipaddress"], "netmask": config["netmask"], "gateway": config["gateway"], "mac": config["mac"], "name": config["name"], "swversion": config["swversion"],
                    "swupdate2": config["swupdate2"], "timezone": config["timezone"], "discovery": config["discovery"]})
+    result["modelid"] = BRIDGE_MODEL_ID
+    if BRIDGE_PRO:
+        result["apiversion"] = BRIDGE_APIVERSION
+        result["swversion"] = BRIDGE_SWVERSION
     result["UTC"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     result["localtime"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     result["LogLevel"] = logManager.logger.get_level_name()
@@ -106,7 +115,7 @@ class NewUser(Resource):
 class ShortConfig(Resource):
     def get(self):
         config = bridgeConfig["config"]
-        return {"apiversion": config["apiversion"], "bridgeid": config["bridgeid"], "datastoreversion": staticConfig()["datastoreversion"], "factorynew": False, "mac": config["mac"], "modelid": "BSB002", "name": config["name"], "replacesbridgeid": None, "starterkitid": "", "swversion": config["swversion"]}
+        return {"apiversion": BRIDGE_APIVERSION or config["apiversion"], "bridgeid": config["bridgeid"], "datastoreversion": staticConfig()["datastoreversion"], "factorynew": False, "mac": config["mac"], "modelid": BRIDGE_MODEL_ID, "name": config["name"], "replacesbridgeid": None, "starterkitid": "", "swversion": BRIDGE_SWVERSION or config["swversion"]}
 
 
 class EntireConfig(Resource):
@@ -141,7 +150,7 @@ class ResourceElements(Resource):
         elif resource == "config":
             config = bridgeConfig["config"]
 
-            return {"name": config["name"], "datastoreversion": staticConfig()["datastoreversion"], "swversion": config["swversion"], "apiversion": config["apiversion"], "mac": config["mac"], "bridgeid": config["bridgeid"], "factorynew": False, "replacesbridgeid": None, "modelid": staticConfig()["modelid"], "starterkitid": ""}
+            return {"name": config["name"], "datastoreversion": staticConfig()["datastoreversion"], "swversion": BRIDGE_SWVERSION or config["swversion"], "apiversion": BRIDGE_APIVERSION or config["apiversion"], "mac": config["mac"], "bridgeid": config["bridgeid"], "factorynew": False, "replacesbridgeid": None, "modelid": BRIDGE_MODEL_ID, "starterkitid": ""}
         return [{"error": {"type": 1, "address": "/", "description": "unauthorized user"}}]
 
     def post(self, username, resource):

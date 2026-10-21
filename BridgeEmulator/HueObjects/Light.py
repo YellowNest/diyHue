@@ -18,6 +18,16 @@ class Light():
         self.uniqueid = data["uniqueid"] if "uniqueid" in data else generate_unique_id()
         self.state = data["state"] if "state" in data else deepcopy(
             lightTypes[self.modelid]["state"])
+        # ``alert: select`` and the Zigbee2MQTT-only ``effect: blink`` are
+        # one-shot identify commands, not persistent Hue light state. Older
+        # MotionAware candidate selection went through ``setV1State`` and
+        # consequently stored both values. Keep this load-time migration
+        # deliberately narrow: it fixes the obsolete identify residue without
+        # changing regular Hue effects such as ``colorloop``.
+        if self.state.get("alert") == "select":
+            self.state["alert"] = "none"
+        if self.state.get("effect") == "blink":
+            self.state["effect"] = "none"
         self.protocol = data["protocol"] if "protocol" in data else "dummy"
         self.config = data["config"] if "config" in data else deepcopy(
             lightTypes[self.modelid]["config"])
@@ -151,7 +161,74 @@ class Light():
 
     def setV1State(self, state, advertise=True):
         if "lights" not in state:
+
+            # OFF must terminate a dynamic scene regardless of
+            # whether the command arrived through V1, V2 or a group.
+            # Otherwise the scene worker can send another colour/
+            # brightness command after OFF and wake the lamp again.
+            if (
+                state.get("on") is False
+                and self.dynamics["status"] == "dynamic_palette"
+            ):
+                self.dynamics["status"] = "none"
+
             state = incProcess(self.state, state)
+
+            # Clamp MQTT colour temperature to the physical Z2M range.
+            #
+            # This happens BEFORE diyHue updates its internal state so
+            # the Hue API, diyHue state and physical lamp cannot disagree
+            # after a client requests a CT value outside the real lamp's
+            # capabilities.
+            if (
+                self.protocol == "mqtt"
+                and "ct" in state
+            ):
+                mqtt_caps = self.protocol_cfg.get(
+                    "z2m_capabilities",
+                    {}
+                )
+
+                try:
+                    ct_value = int(state["ct"])
+                except (TypeError, ValueError):
+                    ct_value = None
+
+                if ct_value is not None:
+                    try:
+                        ct_min = mqtt_caps.get("min_mireds")
+                        ct_min = (
+                            int(ct_min)
+                            if ct_min is not None
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        ct_min = None
+
+                    try:
+                        ct_max = mqtt_caps.get("max_mireds")
+                        ct_max = (
+                            int(ct_max)
+                            if ct_max is not None
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        ct_max = None
+
+                    if (
+                        ct_min is not None
+                        and ct_value < ct_min
+                    ):
+                        ct_value = ct_min
+
+                    if (
+                        ct_max is not None
+                        and ct_value > ct_max
+                    ):
+                        ct_value = ct_max
+
+                    state["ct"] = ct_value
+
             self.updateLightState(state)
             for key, value in state.items():
                 if key in self.state:
@@ -185,8 +262,102 @@ class Light():
             v2State = v1StateToV2(state)
             self.genStreamEvent(v2State)
 
+    def sendV1Command(self, command):
+        """Send a transient protocol command without changing Hue state.
+
+        V2 device identify is a physical one-shot action. It must not persist
+        ``alert: select`` or ``effect: blink`` in the normal light resource,
+        because MotionAware uses identify only while confirming candidates.
+        """
+        if not isinstance(command, dict) or not command:
+            return False
+
+        if self.protocol == "dummy":
+            return False
+
+        for protocol in protocols:
+            if "lights.protocols." + self.protocol != protocol.__name__:
+                continue
+            try:
+                protocol.set_light(self, command)
+                return True
+            except Exception as error:
+                logging.warning(
+                    "%s transient light command failed, details: %s",
+                    self.name,
+                    error,
+                )
+                return False
+
+        logging.warning(
+            "%s transient light command has no protocol handler: %s",
+            self.name,
+            self.protocol,
+        )
+        return False
+
+    def sendIdentifyCommand(self):
+        """Run a transient physical identify without changing Hue state.
+
+        MotionAware chooses candidate *devices*, while the backend needs the
+        most reliable one-shot identify operation for the underlying light
+        protocol. Protocols may provide this explicitly; older backends keep
+        the standard Hue ``alert: select`` fallback.
+        """
+        if self.protocol == "dummy":
+            return False
+
+        for protocol in protocols:
+            if "lights.protocols." + self.protocol != protocol.__name__:
+                continue
+            identify = getattr(protocol, "identify_light", None)
+            if identify is None:
+                return self.sendV1Command({"alert": "select"})
+            try:
+                return bool(identify(self))
+            except Exception as error:
+                logging.warning(
+                    "%s transient identify failed, details: %s",
+                    self.name,
+                    error,
+                )
+                return False
+
+        logging.warning(
+            "%s transient identify has no protocol handler: %s",
+            self.name,
+            self.protocol,
+        )
+        return False
+
     def setV2State(self, state):
+        # CLIP V2 permits identify on a light service as well as its owning
+        # device. Treat it as a transient physical command, never as saved
+        # light state; MotionAware candidate selection can use either form.
+        if (
+            isinstance(state, dict)
+            and isinstance(state.get("identify"), dict)
+            and state["identify"].get("action") == "identify"
+        ):
+            self.sendIdentifyCommand()
+            state = {
+                key: value
+                for key, value in state.items()
+                if key != "identify"
+            }
+            if not state:
+                return
+
         v1State = v2StateToV1(state)
+
+        # Native Hue behaviour: manually switching the light off
+        # terminates a running dynamic scene for this light.
+        if (
+            "on" in state
+            and state["on"].get("on") is False
+            and self.dynamics["status"] == "dynamic_palette"
+        ):
+            self.dynamics["status"] = "none"
         if "effects_v2" in state and "action" in state["effects_v2"]:
             v1State["effect"] = state["effects_v2"]["action"]["effect"]
             self.effect = v1State["effect"]
@@ -215,12 +386,49 @@ class Light():
         streamMessage["data"][0].update({"owner": {"rid": self.getDevice()["id"], "rtype": "device"}})
         streamMessage["data"][0].update({"service_id": self.protocol_cfg["light_nr"]-1 if "light_nr" in self.protocol_cfg else 0})
         StreamEvent(streamMessage)
-        streamMessage = {"creationtime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                         "data": [self.getDevice()],
-                         "id": str(uuid.uuid4()),
-                         "type": "update"
-                         }
+
+        # Normal light state changes (on/off, dimming, colour,
+        # temperature, effects, dynamics) belong to the light
+        # resource only.
+        #
+        # Sending the complete device resource after every MQTT
+        # brightness report creates a large amount of redundant SSE
+        # traffic and can overwhelm Hue clients.
+        #
+        # Device metadata still needs its own update when metadata
+        # actually changes.
+        if "metadata" in v2State:
+            deviceMessage = {
+                "creationtime": datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "data": [self.getDevice()],
+                "id": str(uuid.uuid4()),
+                "type": "update"
+            }
+            StreamEvent(deviceMessage)
+
+    def genZigBeeStreamEvent(self):
+        """Send a V2 connectivity update when reachability changes."""
+
+        zigbee = self.getZigBee()
+
+        streamMessage = {
+            "creationtime": datetime.now(
+                timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "data": [{
+                "id": zigbee["id"],
+                "type": "zigbee_connectivity",
+                "status": zigbee["status"],
+                "owner": zigbee["owner"],
+            }],
+            "id": str(uuid.uuid4()),
+            "type": "update",
+        }
+
         StreamEvent(streamMessage)
+
 
     def getDevice(self):
         result = {"id": str(uuid.uuid5(
@@ -290,34 +498,130 @@ class Light():
                 ]
             }
             result["gradient"] = {"points": self.state["gradient"]["points"],
-                                  "points_capable": self.protocol_cfg["points_capable"]}
+                                  "points_capable": self.protocol_cfg.get("points_capable", 5)}
 
-        # color lights only
-        if self.modelid in ["LST002", "LCT001", "LCT015", "LCX002", "915005987201", "LCX004", "LCX006", "LCA005", "LLC010", "LCG001"]:
-            colorgamut = lightTypes[self.modelid]["v1_static"]["capabilities"]["control"]["colorgamut"]
+        # Prefer physical MQTT/Zigbee2MQTT capabilities when available.
+        #
+        # modelid remains the Hue compatibility template, while
+        # protocol_cfg describes what the real physical lamp supports.
+        mqtt_caps = {}
+
+        if self.protocol == "mqtt":
+            mqtt_caps = self.protocol_cfg.get(
+                "z2m_capabilities",
+                {}
+            )
+
+            if not isinstance(mqtt_caps, dict):
+                mqtt_caps = {}
+
+        supported_modes = mqtt_caps.get(
+            "supported_color_modes"
+        )
+
+        if isinstance(supported_modes, list):
+            has_xy = "xy" in supported_modes
+            has_ct = "color_temp" in supported_modes
+
+        else:
+            # Backwards compatibility for non-MQTT and old configs.
+            has_xy = self.modelid in [
+                "LST002",
+                "LCT001",
+                "LCT015",
+                "LCX002",
+                "915005987201",
+                "LCX004",
+                "LCX006",
+                "LCA005",
+                "LLC010",
+                "LCG001",
+            ]
+
+            has_ct = "ct" in self.state
+
+        if has_xy and "xy" in self.state:
+            colorgamut = (
+                lightTypes[self.modelid]["v1_static"]
+                ["capabilities"]["control"]["colorgamut"]
+            )
+
             result["color"] = {
                 "gamut": {
-                    "blue":  {"x": colorgamut[2][0], "y": colorgamut[2][1]},
-                    "green": {"x": colorgamut[1][0], "y": colorgamut[1][1]},
-                    "red":   {"x": colorgamut[0][0], "y": colorgamut[0][1]}
+                    "blue": {
+                        "x": colorgamut[2][0],
+                        "y": colorgamut[2][1]
+                    },
+                    "green": {
+                        "x": colorgamut[1][0],
+                        "y": colorgamut[1][1]
+                    },
+                    "red": {
+                        "x": colorgamut[0][0],
+                        "y": colorgamut[0][1]
+                    }
                 },
-                "gamut_type": lightTypes[self.modelid]["v1_static"]["capabilities"]["control"]["colorgamuttype"],
+                "gamut_type": (
+                    lightTypes[self.modelid]["v1_static"]
+                    ["capabilities"]["control"]
+                    ["colorgamuttype"]
+                ),
                 "xy": {
                     "x": self.state["xy"][0],
                     "y": self.state["xy"][1]
                 }
             }
-        if "ct" in self.state:
+
+        if has_ct and "ct" in self.state:
+            try:
+                ct_min = int(
+                    mqtt_caps.get("min_mireds", 153)
+                )
+            except (TypeError, ValueError):
+                ct_min = 153
+
+            try:
+                ct_max = int(
+                    mqtt_caps.get("max_mireds", 500)
+                )
+            except (TypeError, ValueError):
+                ct_max = 500
+
+            # Broken discovery must never invert the schema.
+            if ct_min > ct_max:
+                ct_min, ct_max = ct_max, ct_min
+
+            ct_value = self.state.get("ct")
+
+            try:
+                ct_numeric = (
+                    int(ct_value)
+                    if ct_value is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                ct_numeric = None
+
             result["color_temperature"] = {
-                "mirek": self.state["ct"] if self.state["colormode"] == "ct" else None,
+                "mirek": (
+                    ct_numeric
+                    if self.state.get("colormode") == "ct"
+                    else None
+                ),
                 "mirek_schema": {
-                    "mirek_maximum": 500,
-                    "mirek_minimum": 153
+                    "mirek_maximum": ct_max,
+                    "mirek_minimum": ct_min
                 }
             }
-            result["color_temperature"]["mirek_valid"] = True if self.state[
-                "ct"] != None and self.state["ct"] < 500 and self.state["ct"] > 153 else False
+
+            # Hue boundaries are inclusive.
+            result["color_temperature"]["mirek_valid"] = (
+                ct_numeric is not None
+                and ct_min <= ct_numeric <= ct_max
+            )
+
             result["color_temperature_delta"] = {}
+
         if "bri" in self.state:
             bri_value = self.state["bri"]
             if bri_value is None or bri_value == "null":
@@ -332,15 +636,13 @@ class Light():
             "effect_values": [
                 "no_effect",
                 "candle",
-                "fire",
-                "colorloop"
+                "fire"
             ],
             "status": self.effect,
             "status_values": [
                 "no_effect",
                 "candle",
-                "fire",
-                "colorloop"
+                "fire"
             ]
         }
         if self.protocol == "wled":
@@ -473,9 +775,27 @@ class Light():
         logging.debug("Start Dynamic scene play for " + self.name)
         if "dynamic_palette" in self.dynamics["status_values"]:
             self.dynamics["status"] = "dynamic_palette"
-        while self.dynamics["status"] == "dynamic_palette":
-            transition = int(30 / self.dynamics["speed"])
-            logging.debug("using transistiontime " + str(transition))
+        while (
+            self.dynamics["status"] == "dynamic_palette"
+            and self.state.get("on", True)
+        ):
+            try:
+                current_speed = float(self.dynamics["speed"])
+            except (TypeError, ValueError):
+                current_speed = 0.6269841194152832
+
+            # diyHue's existing Hue-like timing model.
+            # Avoid division by zero but otherwise preserve Hue's
+            # incoming dynamics.speed value unchanged.
+            current_speed = max(0.01, current_speed)
+            transition = max(1, int(30 / current_speed))
+
+            logging.debug(
+                "Dynamic scene %s speed %.4f transition %.1fs",
+                self.name,
+                current_speed,
+                transition / 10
+            )
             if self.modelid in ["LCT001", "LCT015", "LST002", "LCX002", "915005987201", "LCX004", "LCX006", "LCA005"]:
                 if index == len(palette["color"]):
                     index = 0
@@ -483,7 +803,7 @@ class Light():
                 if self.modelid in ["LCX002", "915005987201", "LCX004", "LCX006"]:
                     # for gradient lights
                     gradientIndex = index
-                    for x in range(self.protocol_cfg["points_capable"]):
+                    for x in range(self.protocol_cfg.get("points_capable", 5)):
                         points.append(palette["color"][gradientIndex])
                         gradientIndex += 1
                         if gradientIndex == len(palette["color"]):
@@ -507,7 +827,40 @@ class Light():
                 lightState = palette["dimming"][index]
                 lightState["transitiontime"] = transition
                 self.setV2State(lightState)
-            sleep(transition / 10)
+            # Wait in short slices instead of one long sleep.
+            # This lets Hue speed changes and OFF commands take effect
+            # immediately instead of after the current transition.
+            remaining = transition / 10
+
+            while (
+                remaining > 0
+                and self.dynamics["status"] == "dynamic_palette"
+                and self.state.get("on", True)
+            ):
+                try:
+                    new_speed = max(
+                        0.01,
+                        float(self.dynamics["speed"])
+                    )
+                except (TypeError, ValueError):
+                    new_speed = current_speed
+
+                # Hue changed the live speed: recalculate immediately.
+                if abs(new_speed - current_speed) > 0.0001:
+                    break
+
+                chunk = min(0.1, remaining)
+                sleep(chunk)
+                remaining -= chunk
+
+            # OFF or scene deactivation means the worker is finished.
+            if (
+                self.dynamics["status"] != "dynamic_palette"
+                or not self.state.get("on", True)
+            ):
+                self.dynamics["status"] = "none"
+                break
+
             index += 1
             logging.debug("Step forward dynamic scene " + self.name)
         logging.debug("Dynamic Scene " + self.name + " stopped.")

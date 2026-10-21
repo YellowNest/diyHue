@@ -33,8 +33,12 @@ class Group():
         StreamEvent(streamMessage)
 
     def groupZeroStream(self, rooms, lights):
+        # Keep bridge-home events on the same stable public RID as
+        # v2restapi.v2BridgeHomeId().  Group 0 is only an internal helper;
+        # its generated id_v2 must not leak into CLIP references.
+        from configManager import bridgeConfig as config_store
         streamMessage = {"creationtime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                         "data": [{"children": [], "id": str(uuid.uuid5(uuid.NAMESPACE_URL, self.id_v2 + 'bridge_home')),  "id_v1":"/groups/0", "type": "bridge_home"}],
+                         "data": [{"children": [], "id": str(uuid.uuid5(uuid.NAMESPACE_URL, config_store.yaml_config["config"]["bridgeid"] + 'bridge_home')),  "id_v1":"/groups/0", "type": "bridge_home"}],
                          "id": str(uuid.uuid4()),
                          "type": "update"
                          }
@@ -160,39 +164,66 @@ class Group():
         v2State = v1StateToV2(state)
         self.genStreamEvent(v2State)
 
-    def genStreamEvent(self, v2State):
-        streamMessage = {"creationtime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                               "data": [],
-                                 "id": str(uuid.uuid4()),
-                                 "type": "update"
-                                 }
-        for num, light in enumerate(self.lights):
-            if light():
-                streamMessage["data"].insert(num,{
-                    "id": light().id_v2,
-                    "id_v1": "/lights/" + light().id_v1,
-                    "owner": {
-                        "rid": light().getDevice()["id"],
-                        "rtype":"device"
-                    },
-                    "service_id": light().protocol_cfg["light_nr"]-1 if "light_nr" in light().protocol_cfg else 0,
-                    "type": "light"
-                })
-                streamMessage["data"][num].update(v2State)
-        StreamEvent(streamMessage)
+    def _getV2GroupedLightOwner(self):
+        """Return the canonical V2 owner for this grouped_light."""
+        if self.id_v1 == "0":
+            # Match v2restapi.v2BridgeHomeId().  A group-0-derived RID is not
+            # served as bridge_home and makes V2 clients fail graph resolution.
+            from configManager import bridgeConfig as config_store
+            return {
+                "rid": str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    config_store.yaml_config["config"]["bridgeid"] + 'bridge_home'
+                )),
+                "rtype": "bridge_home"
+            }
 
-        if "on" in v2State:
-            v2State["dimming"] = {"brightness": self.update_state()["avr_bri"]}
-        streamMessage = {"creationtime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                         "data": [{"id": self.id_v2,"id_v1": "/groups/" + self.id_v1, "type": "grouped_light",
-                                   "owner": {
-                                       "rid": self.getV2Room()["id"] if self.type == "Room" else self.getV2Zone()["id"],
-                                       "rtype": "room" if self.type == "Room" else "zone"
-                                   }
-                                   }],
-                         "id": str(uuid.uuid4()),
-                         "type": "update"
-                         }
+        if self.type == "Room":
+            return {
+                "rid": self.getV2Room()["id"],
+                "rtype": "room"
+            }
+
+        if self.type == "Zone":
+            return {
+                "rid": self.getV2Zone()["id"],
+                "rtype": "zone"
+            }
+
+        return None
+
+    def genStreamEvent(self, v2State):
+        # Do not mirror one light state onto every light in the group.
+        # Individual light events are already emitted by Light.genStreamEvent().
+        v2State = dict(v2State)
+
+        # Recalculate grouped_light for both ON/OFF and pure
+        # brightness updates. Home Assistant/Zigbee2MQTT may update
+        # brightness without Hue having issued the original command.
+        if "on" in v2State or "dimming" in v2State:
+            group_state = self.update_state()
+            v2State["on"] = {
+                "on": group_state["any_on"]
+            }
+            v2State["dimming"] = {
+                "brightness": group_state["avr_bri"]
+            }
+        stream_data = {
+            "id": self.id_v2,
+            "id_v1": "/groups/" + self.id_v1,
+            "type": "grouped_light"
+        }
+
+        owner = self._getV2GroupedLightOwner()
+        if owner is not None:
+            stream_data["owner"] = owner
+
+        streamMessage = {
+            "creationtime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "data": [stream_data],
+            "id": str(uuid.uuid4()),
+            "type": "update"
+        }
         streamMessage["data"][0].update(v2State)
         StreamEvent(streamMessage)
 
@@ -320,10 +351,11 @@ class Group():
         result["id_v1"] = "/groups/" + self.id_v1
         result["on"] = {"on": self.update_state()["any_on"]}
         result["type"] = "grouped_light"
-        if hasattr(self, "owner"):
-            result["owner"] = {"rid": self.owner.username, "rtype": "device"}
-        else:
-            result["owner"] = {"rid": self.id_v2, "rtype": "device"}
+
+        owner = self._getV2GroupedLightOwner()
+        if owner is not None:
+            result["owner"] = owner
+
         result["signaling"] = {"signal_values": [
             "no_signal",
             "on_off"]}

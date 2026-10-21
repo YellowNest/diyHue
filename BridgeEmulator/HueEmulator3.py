@@ -112,7 +112,11 @@ def main():
     HOST_HTTPS_PORT = configManager.runtimeConfig.arg["HTTPS_PORT"]
     CONFIG_PATH = configManager.runtimeConfig.arg["CONFIG_PATH"]
     DISABLE_HTTPS = configManager.runtimeConfig.arg["noServeHttps"]
-    updateManager.startupCheck()
+    bridge_pro = os.getenv("BRIDGE_PROFILE", "").lower() == "pro"
+    if bridge_pro:
+        logging.info("Bridge Pro profile active; skipping classic firmware startup check")
+    else:
+        updateManager.startupCheck()
 
     def shutdown(signum, frame):
         logging.info("Received signal %s, saving config and shutting down", signum)
@@ -131,6 +135,20 @@ def main():
                     except Exception:
                         pass
                 group.stream["active"] = False
+        # The process exits with os._exit(), which bypasses atexit handlers.
+        # Stop MQTT producers and drain the publisher before saving/exiting.
+        try:
+            from lights.protocols.mqtt import shutdown_mqtt_publishers
+            shutdown_mqtt_publishers()
+        except Exception as e:
+            logging.error("MQTT shutdown failed: %s", e)
+        # The process exits with os._exit(), which bypasses atexit handlers.
+        # Stop MQTT producers and drain the publisher before saving/exiting.
+        try:
+            from lights.protocols.mqtt import shutdown_mqtt_publishers
+            shutdown_mqtt_publishers()
+        except Exception as e:
+            logging.error("MQTT shutdown failed: %s", e)
         # Full save — catches everything including undirtied background mutations.
         # blocking=True ensures we wait if restore/reset is in progress.
         try:
@@ -155,9 +173,22 @@ def main():
         Thread(target=remoteDiscover.runRemoteDiscover, args=[bridgeConfig["config"]]).start()
     Thread(target=remoteApi.runRemoteApi, args=[BIND_IP, bridgeConfig["config"]]).start()
     Thread(target=stateFetch.syncWithLights, args=[False]).start()
-    Thread(target=ssdp.ssdpSearch, args=[HOST_IP, HOST_HTTP_PORT, mac]).start()
-    Thread(target=ssdp.ssdpBroadcast, args=[HOST_IP, HOST_HTTP_PORT, mac]).start()
-    Thread(target=mdns.mdnsListener, args=[HOST_IP, HOST_HTTP_PORT, "BSB002", bridgeConfig["config"]["bridgeid"]]).start()
+    if not bridge_pro:
+        Thread(target=ssdp.ssdpSearch, args=[HOST_IP, HOST_HTTP_PORT, mac]).start()
+        Thread(target=ssdp.ssdpBroadcast, args=[HOST_IP, HOST_HTTP_PORT, mac]).start()
+
+    if bridge_pro and DISABLE_HTTPS:
+        logging.error("Bridge Pro profile requires HTTPS; mDNS advertisement disabled")
+    else:
+        Thread(
+            target=mdns.mdnsListener,
+            args=[
+                HOST_IP,
+                HOST_HTTPS_PORT if bridge_pro else HOST_HTTP_PORT,
+                "BSB003" if bridge_pro else "BSB002",
+                bridgeConfig["config"]["bridgeid"]
+            ]
+        ).start()
     Thread(target=scheduler.runScheduler).start()
     Thread(target=eventStreamer.messageBroker).start()
     if not DISABLE_HTTPS:

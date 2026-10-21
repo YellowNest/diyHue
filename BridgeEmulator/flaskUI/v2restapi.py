@@ -1,5 +1,6 @@
 import configManager
 import logManager
+import os
 from HueObjects import Group, EntertainmentConfiguration, Scene, BehaviorInstance, GeofenceClient, SmartScene, StreamEvent
 import uuid
 import json
@@ -14,14 +15,177 @@ from datetime import datetime, timezone
 from functions.scripts import behaviorScripts
 from lights.discover import scanForLights
 from functions.daylightSensor import daylightSensor
+from functions.motionAware import (
+    v2MotionAwareResources,
+    v2MotionAwareRooms,
+    v2MotionAreaCandidateService,
+    findMotionAwareResource,
+    createMotionAwareArea,
+    updateMotionAwareResource,
+    deleteMotionAwareArea,
+    setMotionAwareDebugMotion,
+)
 
 logging = logManager.logger.get_logger(__name__)
 
 bridgeConfig = configManager.bridgeConfig.yaml_config
 
+# Temporary, credential-free MotionAware diagnostics.  Kept behind an
+# environment switch so it can be removed/disabled without changing API data.
+def _motion_diag(resource, resourceid=None, method=None, body=None, status=None):
+    if os.getenv("HUE_MOTION_DIAGNOSTICS", "1").lower() not in ("1", "true", "yes"):
+        return
+    if resource not in PRO_MOTION_DIAGNOSTIC_TYPES and resource not in ("device", "light"):
+        return
+    safe = body
+    if isinstance(safe, dict):
+        safe = {k: ("<redacted>" if k.lower() in {"username", "clientkey", "hue-application-key", "authorization", "token"} else v) for k, v in safe.items()}
+    logging.info("MOTION_DIAG %s", json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "client": request.remote_addr, "method": method or request.method, "path": request.path, "resource": resource, "resourceid": resourceid, "body": safe, "status": status}, sort_keys=True, default=str))
+
+PRO_MOTION_RESOURCE_TYPES = (
+    "motion_area_configuration",
+    "convenience_area_motion",
+    "security_area_motion",
+)
+
+# Diagnostics must observe MotionAware's time-slot editor too, but behavior
+# instances are regular CLIP resources, not MotionAware served collections.
+# Keep observability separate from resource dispatch: conflating the two made
+# GET /behavior_instance/{rid} fall into findMotionAwareResource() and return
+# a false empty result.
+PRO_MOTION_DIAGNOSTIC_TYPES = (
+    *PRO_MOTION_RESOURCE_TYPES,
+    "behavior_instance",
+)
+
+# Resource types exposed by a live Bridge Pro clip capability.
+# motion_area_candidate is intentionally NOT a served collection;
+# it exists as a ResourceIdentifier/service on compatible devices.
+PRO_CAPABILITY_RESOURCES = [
+    "motion_area_configuration",
+    "convenience_area_motion",
+    "security_area_motion",
+    "entertainment_configuration",
+    "bridge",
+    "button",
+    "device",
+    "device_power",
+    "device_software_update",
+    "entertainment",
+    "light",
+    "light_level",
+    "zigbee_connectivity",
+    "zgp_connectivity",
+    "motion",
+    "camera_motion",
+    "relative_rotary",
+    "temperature",
+    "zigbee_device_discovery",
+    "contact",
+    "tamper",
+    "speaker",
+    "bell_button",
+    "switch_input_configuration",
+    "bridge_home",
+    "grouped_light",
+    "grouped_light_level",
+    "grouped_motion",
+    "room",
+    "service_group",
+    "zone",
+    "scene",
+    "matter",
+    "matter_fabric",
+    "behavior_script",
+    "behavior_instance",
+    "geofence_client",
+    "geolocation",
+    "smart_scene",
+    "clip",
+]
+
+# We advertise these because Bridge Pro exposes them, but diyHue does
+# not emulate their contents yet. Return a valid empty collection.
+PRO_EMPTY_RESOURCE_TYPES = (
+    "device_software_update",
+    "zgp_connectivity",
+    "camera_motion",
+    "tamper",
+    "speaker",
+    "bell_button",
+    "switch_input_configuration",
+    "grouped_light_level",
+    "grouped_motion",
+    "service_group",
+    "matter",
+    "matter_fabric",
+)
+
+def _isBridgePro():
+    return os.getenv("BRIDGE_PROFILE", "").lower() == "pro"
+
 v2Resources = {"light": {}, "scene": {}, "smart_scene": {}, "grouped_light": {}, "room": {}, "zone": {
 }, "entertainment": {}, "entertainment_configuration": {}, "zigbee_connectivity": {}, "zigbee_device_discovery": {}, "device": {}, "device_power": {},
-"geofence_client": {}, "motion": {}, "light_level": {}, "temperature": {}, "relative_rotary": {}, "button": {}}
+"geofence_client": {}, "motion": {}, "light_level": {}, "temperature": {}, "relative_rotary": {}, "button": {}, "contact": {}}
+
+
+def _identifyMotionAwareLight(light):
+    """Map V2 device identify to a transient physical lamp action."""
+    if hasattr(light, "firstElement"):
+        light = light.firstElement()
+    if light is None:
+        logging.warning("MOTION_IDENTIFY ignored: device has no light service")
+        return False
+    sent = light.sendIdentifyCommand()
+    logging.info(
+        "MOTION_IDENTIFY light=%s protocol=%s action=%s sent=%s",
+        light.id_v1,
+        light.protocol,
+        {"identify": "transient"},
+        sent,
+    )
+    return sent
+
+
+def _withMotionAreaCandidate(device):
+    """Attach the candidate service reference owned by this device."""
+    if not isinstance(device, dict):
+        return device
+    owner_id = device.get("id")
+    for _group, candidates in v2MotionAwareRooms():
+        for candidate in candidates:
+            if candidate.getDevice().get("id") != owner_id:
+                continue
+            services = device.setdefault("services", [])
+            reference = v2MotionAreaCandidateService(candidate)
+            if reference not in services:
+                services.append(reference)
+            return device
+    return device
+
+
+def _isVisibleBehaviorInstance(instance):
+    """Return false only for a behavior bound to a deleted MotionAware area.
+
+    Hue keeps behavior instances in its local resource cache.  Returning an
+    instance whose source area no longer exists makes the client treat the
+    associated room/area as an externally removed or malformed resource.  Do
+    not apply this rule to normal automation behavior instances.
+    """
+    configuration = getattr(instance, "configuration", None)
+    if not isinstance(configuration, dict):
+        return True
+
+    source = configuration.get("source")
+    if (
+        not isinstance(source, dict)
+        or source.get("rtype") != "motion_area_configuration"
+    ):
+        return True
+
+    return findMotionAwareResource(
+        "motion_area_configuration", source.get("rid")
+    ) is not None
 
 
 def getObject(element, v2uuid):
@@ -134,6 +298,20 @@ def v2GeofenceClient():
     return result
 
 
+def v2BridgeHomeId():
+    """Return the persistent CLIP id for the single bridge-home resource.
+
+    Group zero is an in-memory diyHue helper and is recreated at startup.  It
+    must not define a public CLIP identifier, because persisted V2 references
+    (including MotionAware groups) would otherwise become dangling after each
+    bridge restart.
+    """
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        bridgeConfig["config"]["bridgeid"] + "bridge_home"
+    ))
+
+
 def v2BridgeHome():
     result = {}
     result["children"] = []
@@ -144,8 +322,7 @@ def v2BridgeHome():
     #        "rid": bridgeConfig["groups"]["0"].id_v2,
     #        "rtype": "grouped_light"
     #    })
-    result["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL,
-                                  bridgeConfig["groups"]["0"].id_v2 + 'bridge_home'))
+    result["id"] = v2BridgeHomeId()
     result["id_v1"] = "/groups/0"
     result["services"] = []
     result["type"] = "bridge_home"
@@ -156,8 +333,27 @@ def v2BridgeHome():
         if group.type == "Room":
             result["children"].append({"rid": group.getV2Room()["id"], "rtype": "room"})
     for key, sensor in bridgeConfig["sensors"].items():
-        if sensor.getBridgeHome():
-            result["services"].append(sensor.getBridgeHome())
+        device = sensor.getDevice()
+
+        if device is None:
+            continue
+
+        if (
+            sensor.modelid == "DS01"
+            and sensor.type == "ZHAOpenClose"
+        ):
+            child = {
+                "rid": device["id"],
+                "rtype": "device"
+            }
+
+            if child not in result["children"]:
+                result["children"].append(child)
+
+        elif sensor.getBridgeHome():
+            result["services"].append(
+                sensor.getBridgeHome()
+            )
     result["services"].append({"rid": bridgeConfig["groups"]["0"].id_v2 ,"rtype": "grouped_light"})
     return result
 
@@ -185,26 +381,44 @@ def geoLocation():
     }
 
 
+
+def v2Clip():
+    if not _isBridgePro():
+        return None
+
+    config = bridgeConfig["config"]
+    return {
+        "id": str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            config["bridgeid"] + "clip"
+        )),
+        "resources": PRO_CAPABILITY_RESOURCES.copy(),
+        "type": "clip"
+    }
+
+
 def v2BridgeDevice():
     config = bridgeConfig["config"]
     bridge_id = config["bridgeid"]
     result = {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, bridge_id + 'device')), "type": "device"}
     result["id_v1"] = ""
-    result["metadata"] = {"archetype": "bridge_v2", "name": config["name"]}
+    bridge_pro = os.getenv("BRIDGE_PROFILE", "").lower() == "pro"
+    archetype = "bridge_v3" if bridge_pro else "bridge_v2"
+    result["metadata"] = {"archetype": archetype, "name": config["name"]}
     result["identify"] = {}
     result["product_data"] = {
         "certified": True,
         "manufacturer_name": "Signify Netherlands B.V.",
-        "model_id": "BSB002",
-        "product_archetype": "bridge_v2",
-        "product_name": "Philips hue",
-        "software_version": config["apiversion"][:5] + config["swversion"]
+        "model_id": "BSB003" if bridge_pro else "BSB002",
+        "product_archetype": archetype,
+        "product_name": "Hue Bridge" if bridge_pro else "Philips hue",
+        "software_version": "1.78.2071442000" if bridge_pro else config["apiversion"][:5] + config["swversion"]
     }
     result["services"] = [
         {"rid": str(uuid.uuid5(uuid.NAMESPACE_URL, bridge_id + 'bridge')), "rtype": "bridge"},
         {"rid": str(uuid.uuid5(uuid.NAMESPACE_URL, bridge_id + 'zigbee_connectivity')), "rtype": "zigbee_connectivity"},
         {"rid": str(uuid.uuid5(uuid.NAMESPACE_URL, bridge_id + 'zigbee_device_discovery')), "rtype": "zigbee_device_discovery"},
-        {"rid": str(uuid.uuid5(uuid.NAMESPACE_URL, bridge_id + 'entertainment')), "rtype": "entertainment"}
+        {"rid": "57a9ebc9-406d-4a29-a4ff-42acee9e9be7", "rtype": "entertainment"}
     ]
     return result
 
@@ -243,20 +457,29 @@ class ClipV2(Resource):
         # device
         data.append(v2BridgeDevice())
         for key, light in bridgeConfig["lights"].items():
-            data.append(light.getDevice())
+            data.append(_withMotionAreaCandidate(light.getDevice()))
         for key, sensor in bridgeConfig["sensors"].items():
             if sensor.getDevice() != None:
                 data.append(sensor.getDevice())
         # bridge
         data.append(v2Bridge())
         data.append(v2DiyHueBridge())
+
+        clip = v2Clip()
+        if clip is not None:
+            data.append(clip)
         # zigbee
         data.append(v2BridgeZigBee())
         for key, light in bridgeConfig["lights"].items():
             data.append(light.getZigBee())
         for key, sensor in bridgeConfig["sensors"].items():
-            if sensor.getZigBee() != None:
-                data.append(sensor.getZigBee())
+            if (
+                sensor.getDevice() is not None
+                and sensor.getZigBee() is not None
+            ):
+                data.append(
+                    sensor.getZigBee()
+                )
         data.append(v2BridgeZigBeeDiscovery())
         # entertainment
         data.append(v2BridgeEntertainment())
@@ -279,7 +502,8 @@ class ClipV2(Resource):
                 data.append(group.getV2Zone())
         # behavior_instance
         for key, instance in bridgeConfig["behavior_instance"].items():
-            data.append(instance.getV2Api())
+            if _isVisibleBehaviorInstance(instance):
+                data.append(instance.getV2Api())
         # entertainment_configuration
         for key, group in bridgeConfig["groups"].items():
             if group.type == "Entertainment":
@@ -304,6 +528,9 @@ class ClipV2(Resource):
             power = sensor.getDevicePower()
             if power != None:
                 data.append(power)
+            contact = sensor.getContact()
+            if contact != None:
+                data.append(contact)
             rotarys = sensor.getRotary()
             if len(rotarys) != 0:
                 for rotary in rotarys:
@@ -314,6 +541,9 @@ class ClipV2(Resource):
             lightlevel = sensor.getLightlevel()
             if lightlevel != None:
                 data.append(lightlevel)
+
+        for resources in v2MotionAwareResources().values():
+            data.extend(resources)
 
         return {"errors": [], "data": data}
 
@@ -365,7 +595,7 @@ class ClipV2Resource(Resource):
                     response["data"].append(group.getV2Api())
         elif resource == "device":
             for key, light in bridgeConfig["lights"].items():
-                response["data"].append(light.getDevice())
+                response["data"].append(_withMotionAreaCandidate(light.getDevice()))
             for key, sensor in bridgeConfig["sensors"].items():
                 device = sensor.getDevice()
                 if device != None:
@@ -385,7 +615,8 @@ class ClipV2Resource(Resource):
             response["data"].append(geoLocation())
         elif resource == "behavior_instance":
             for key, instance in bridgeConfig["behavior_instance"].items():
-                response["data"].append(instance.getV2Api())
+                if _isVisibleBehaviorInstance(instance):
+                    response["data"].append(instance.getV2Api())
         elif resource == "geofence_client":
             response["data"].append(v2GeofenceClient())
         elif resource == "behavior_script":
@@ -396,6 +627,11 @@ class ClipV2Resource(Resource):
                 motion = sensor.getMotion()
                 if motion != None:
                     response["data"].append(motion)
+        elif resource == "contact":
+            for key, sensor in bridgeConfig["sensors"].items():
+                contact = sensor.getContact()
+                if contact != None:
+                    response["data"].append(contact)
         elif resource == "device_power":
             for key, sensor in bridgeConfig["sensors"].items():
                 power = sensor.getDevicePower()
@@ -423,6 +659,13 @@ class ClipV2Resource(Resource):
                 lightlevel = sensor.getLightlevel()
                 if lightlevel != None:
                     response["data"].append(lightlevel)
+        elif resource == "clip" and _isBridgePro():
+            response["data"].append(v2Clip())
+        elif resource in PRO_EMPTY_RESOURCE_TYPES and _isBridgePro():
+            # Valid Bridge Pro collection, not implemented yet.
+            pass
+        elif resource in PRO_MOTION_RESOURCE_TYPES and _isBridgePro():
+            response["data"].extend(v2MotionAwareResources().get(resource, []))
         else:
             response["errors"].append({"description": "Not Found"})
             del response["data"]
@@ -435,6 +678,27 @@ class ClipV2Resource(Resource):
         if "user" not in authorisation:
             return "", 403
         postDict = request.get_json(force=True)
+        _motion_diag(resource, method="POST", body=postDict)
+        if resource == "motion_area_configuration":
+            created = createMotionAwareArea(postDict)
+            if created is None:
+                return "", 403
+            # Hue 5.73 decodes the create result as MotionAreaConfigurationId,
+            # not as a full resource. Keep this acknowledgement deliberately
+            # minimal (the standard V2 create contract); the app fetches the
+            # complete resource after it has the identifier.
+            result = {
+                "rid": created["id"],
+                "rtype": resource,
+            }
+            _motion_diag(
+                resource,
+                created["id"],
+                method="POST",
+                body=postDict,
+                status=201,
+            )
+            return {"data": [result], "errors": []}, 201
         logging.info(postDict)
         newObject = None
         if resource == "scene":
@@ -568,9 +832,22 @@ class ClipV2Resource(Resource):
                 }]
             }, 500
 
+        # A room/zone CLIP resource is distinct from its grouped_light service.
+        # `Group.id_v2` is the latter, so returning it together with rtype
+        # "room" or "zone" gives clients a dangling resource reference.  Hue
+        # immediately reuses the create response when it writes a MotionAware
+        # behavior's `where` target, therefore acknowledge the actual group
+        # resource ID instead.
+        if resource == "room":
+            resource_id = newObject.getV2Room()["id"]
+        elif resource == "zone":
+            resource_id = newObject.getV2Zone()["id"]
+        else:
+            resource_id = newObject.id_v2
+
         # return message
         returnMessage = {"data": [{
-            "rid": newObject.id_v2,
+            "rid": resource_id,
             "rtype": resource}
         ], "errors": []}
 
@@ -584,6 +861,47 @@ class ClipV2ResourceId(Resource):
         authorisation = authorizeV2(request.headers)
         if "user" not in authorisation:
             return "", 403
+        if resource == "clip" and _isBridgePro():
+            clip = v2Clip()
+            return {
+                "errors": [],
+                "data": [clip] if clip and clip["id"] == resourceid else []
+            }
+        if resource == "bridge_home":
+            # A MotionAware area may reference the bridge home as its group.
+            # It is a generated singleton rather than a weakref-backed V1
+            # object, so resolve it directly instead of falling into
+            # getObject()/v2Resources (which returns an empty result or 500).
+            home = v2BridgeHome()
+            return {
+                "errors": [],
+                "data": [home] if home["id"] == resourceid else []
+            }
+        if resource in PRO_EMPTY_RESOURCE_TYPES and _isBridgePro():
+            return {"errors": [], "data": []}
+        if resource == "behavior_instance":
+            # Hue opens a MotionAware area through its behavior instance RID.
+            # The collection endpoint was implemented, but the ID endpoint
+            # fell through getObject(), which has no behavior-instance lookup
+            # and returned a misleading 200 with an empty data array.  That
+            # is treated by the client as an externally removed rule.
+            object = next(
+                (
+                    instance
+                    for instance in bridgeConfig["behavior_instance"].values()
+                    if instance.id_v2 == resourceid
+                ),
+                None,
+            )
+            return {
+                "errors": [],
+                "data": [object.getV2Api()]
+                if object and _isVisibleBehaviorInstance(object)
+                else []
+            }
+        if resource in PRO_MOTION_RESOURCE_TYPES and _isBridgePro():
+            object = findMotionAwareResource(resource, resourceid)
+            return {"errors": [], "data": [object] if object else []}
         object = getObject(resource, resourceid)
         if not object:
             return {"errors": [], "data": []}
@@ -610,6 +928,8 @@ class ClipV2ResourceId(Resource):
             return {"errors": [], "data": [v2Bridge()]}
         elif resource == "motion":
             return {"errors": [], "data": [object.getMotion()]}
+        elif resource == "contact":
+            return {"errors": [], "data": [object.getContact()]}
         elif resource == "device_power":
             return {"errors": [], "data": [object.getDevicePower()]}
         elif resource == "button":
@@ -627,6 +947,41 @@ class ClipV2ResourceId(Resource):
         if "user" not in authorisation:
             return "", 403
         putDict = request.get_json(force=True)
+        _motion_diag(resource, resourceid, method="PUT", body=putDict)
+
+        # MOTIONAWARE_DEBUG_PUT_V1
+        # Temporary private field for proving live state + SSE.
+        if (
+            resource in (
+                "convenience_area_motion",
+                "security_area_motion"
+            )
+            and "debug_motion" in putDict
+        ):
+            updated = setMotionAwareDebugMotion(
+                resource,
+                resourceid,
+                bool(putDict["debug_motion"])
+            )
+
+            if updated is None:
+                return {
+                    "errors": [{
+                        "description": "MotionAware resource not found"
+                    }]
+                }, 404
+
+            return {
+                "data": [updated],
+                "errors": []
+            }
+
+        if resource in ("motion_area_configuration", "convenience_area_motion", "security_area_motion"):
+            updated = updateMotionAwareResource(resource, resourceid, putDict)
+            if updated is None:
+                return {"errors": [{"description": "Resource not found"}]}, 404
+            _motion_diag(resource, resourceid, method="PUT", body=putDict, status=200)
+            return {"data": [updated], "errors": []}
         logging.info(putDict)
         object = getObject(resource, resourceid)
         if resource == "light":
@@ -650,15 +1005,232 @@ class ClipV2ResourceId(Resource):
                         proc.kill()
                     object.update_attr({"stream": {"active": False}})
         elif resource == "scene":
-            if "recall" in putDict:
-                object.activate(putDict)
+            scene_changed = False
+
+            # Hue API v2 scene editing supplies the scene's action list here.
+            # This was previously ignored by diyHue, causing lamp selections
+            # made in the Hue app to disappear.
+            if "actions" in putDict:
+                newLightStates = weakref.WeakKeyDictionary()
+                actionLights = []
+
+                for action in putDict["actions"]:
+                    target = action.get(
+                        "target",
+                        {},
+                    )
+
+                    if target.get("rtype") != "light":
+                        continue
+
+                    targetRid = target.get("rid")
+
+                    if not targetRid:
+                        continue
+
+                    lightObj = getObject(
+                        "light",
+                        targetRid,
+                    )
+
+                    if not lightObj:
+                        logging.warning(
+                            "Scene action references unknown light "
+                            + str(targetRid)
+                        )
+                        continue
+
+                    sceneAction = action.get(
+                        "action",
+                        {},
+                    )
+
+                    sceneState = {}
+
+                    onState = sceneAction.get("on")
+
+                    if (
+                        isinstance(onState, dict)
+                        and "on" in onState
+                    ):
+                        sceneState["on"] = bool(
+                            onState["on"]
+                        )
+
+                    dimming = sceneAction.get(
+                        "dimming"
+                    )
+
+                    if (
+                        isinstance(dimming, dict)
+                        and dimming.get("brightness")
+                            is not None
+                    ):
+                        sceneState["bri"] = int(
+                            max(
+                                0.0,
+                                min(
+                                    100.0,
+                                    float(
+                                        dimming["brightness"]
+                                    ),
+                                ),
+                            )
+                            * 2.54
+                        )
+
+                    color = sceneAction.get(
+                        "color"
+                    )
+
+                    if isinstance(color, dict):
+                        xy = color.get("xy")
+
+                        if (
+                            isinstance(xy, dict)
+                            and xy.get("x") is not None
+                            and xy.get("y") is not None
+                        ):
+                            sceneState["xy"] = [
+                                float(xy["x"]),
+                                float(xy["y"]),
+                            ]
+
+                    colorTemperature = sceneAction.get(
+                        "color_temperature"
+                    )
+
+                    if isinstance(
+                        colorTemperature,
+                        dict,
+                    ):
+                        mirek = colorTemperature.get(
+                            "mirek"
+                        )
+
+                        if mirek is not None:
+                            sceneState["ct"] = int(
+                                mirek
+                            )
+
+                    if "gradient" in sceneAction:
+                        sceneState["gradient"] = (
+                            sceneAction["gradient"]
+                        )
+
+                    newLightStates[lightObj] = (
+                        sceneState
+                    )
+
+                    actionLights.append(
+                        lightObj
+                    )
+
+                # "actions" represents the current V2 scene action set.
+                # Replacing rather than merging is important: a light that
+                # disappears from the action list must no longer be triggered.
+                object.lightstates = newLightStates
+
+                # LightScene owns its explicit light list. GroupScene keeps
+                # the room's complete light list and uses lightstates to
+                # determine scene participation.
+                if object.type == "LightScene":
+                    object.lights = [
+                        weakref.ref(light)
+                        for light in actionLights
+                    ]
+
+                scene_changed = True
+
+            # Preserve the existing diyHue speed compatibility fix.
+            # Hue scene speed is 0.0..1.0. Apply it BEFORE recall
+            # and propagate changes to an already running dynamic scene.
             if "speed" in putDict:
-                object.speed = putDict["speed"]
+                try:
+                    requested_speed = max(
+                        0.0,
+                        min(
+                            1.0,
+                            float(putDict["speed"]),
+                        ),
+                    )
+
+                    object.speed = requested_speed
+
+                    for light_ref in object.lights:
+                        light = light_ref()
+
+                        if (
+                            light
+                            and light.dynamics["status"]
+                                == "dynamic_palette"
+                        ):
+                            # dynamicScenePlay divides by speed. Keep API
+                            # speed=0 while using a safe execution floor.
+                            light.dynamics["speed"] = max(
+                                requested_speed,
+                                0.01,
+                            )
+
+                    scene_changed = True
+
+                except (TypeError, ValueError):
+                    pass
+
+            if "recall" in putDict:
+                # Scene.activate() copies object.speed to every light.
+                # Preserve API speed=0 while supplying a safe execution
+                # floor to diyHue's current 30/speed implementation.
+                original_speed = object.speed
+
+                if original_speed <= 0:
+                    object.speed = 0.01
+
+                try:
+                    object.activate(putDict)
+                finally:
+                    object.speed = original_speed
+
             if "palette" in putDict:
                 object.palette = putDict["palette"]
+                scene_changed = True
+
             if "metadata" in putDict:
-                object.name = putDict["metadata"]["name"]
-                configManager.bridgeConfig.mark_dirty("scenes")
+                metadata = putDict["metadata"]
+
+                if "name" in metadata:
+                    object.name = metadata["name"]
+                    scene_changed = True
+
+                if "image" in metadata:
+                    image = metadata["image"]
+
+                    if isinstance(image, dict):
+                        object.image = image.get(
+                            "rid"
+                        )
+                    else:
+                        object.image = None
+
+                    scene_changed = True
+
+            if scene_changed:
+                object.lastupdated = datetime.now(
+                    timezone.utc
+                ).strftime(
+                    "%Y-%m-%dT%H:%M:%S"
+                )
+
+                configManager.bridgeConfig.mark_dirty(
+                    "scenes"
+                )
+
+                # Scene edits are user configuration and must survive a
+                # restart immediately rather than waiting for debounce.
+                configManager.bridgeConfig.save_config(
+                    backup=False,
+                    resource="scenes",
+                )
         elif resource == "smart_scene":
             if "recall" in putDict and "action" in putDict["recall"]:
                 object.activate(putDict)
@@ -741,7 +1313,7 @@ class ClipV2ResourceId(Resource):
                 Thread(target=scanForLights).start()
         elif resource == "device":
             if "identify" in putDict and putDict["identify"]["action"] == "identify":
-                object.setV1State({"alert": "select"})
+                _identifyMotionAwareLight(object)
             if "metadata" in putDict:
                 if "name" in putDict["metadata"]:
                     if object:
@@ -766,6 +1338,15 @@ class ClipV2ResourceId(Resource):
             if "enabled" in putDict:
                 object.update_attr({"config": {"on": putDict["enabled"]}})
                 configManager.bridgeConfig.mark_dirty("sensors")
+        elif resource == "contact":
+            if "enabled" in putDict:
+                object.update_attr({
+                    "config": {
+                        "on": bool(putDict["enabled"])
+                    }
+                })
+                configManager.bridgeConfig.mark_dirty("sensors")
+                object.genContactStreamEvent()
         else:
             return {
                 "errors": [{
@@ -783,8 +1364,14 @@ class ClipV2ResourceId(Resource):
     def delete(self, resource, resourceid):
         # logging.debug(request.headers)
         authorisation = authorizeV2(request.headers)
+        _motion_diag(resource, resourceid, method="DELETE")
         if "user" not in authorisation:
             return "", 403
+        if resource == "motion_area_configuration":
+            if not deleteMotionAwareArea(resourceid):
+                return {"errors": [{"description": "Resource not found"}]}, 404
+            _motion_diag(resource, resourceid, method="DELETE", status=200)
+            return {"data": [{"rid": resourceid, "rtype": resource}], "errors": []}
         object = getObject(resource, resourceid)
 
         if hasattr(object, 'getObjectPath'):

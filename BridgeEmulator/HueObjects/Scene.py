@@ -60,11 +60,47 @@ class Scene():
                 self.status = data["recall"]["action"]
                 lightIndex = 0
                 for light in self.lights:
-                    if light():
-                        light().dynamics["speed"] = self.speed
-                        Thread(target=light().dynamicScenePlay, args=[
-                            self.palette, lightIndex]).start()
-                        lightIndex += 1
+                    if not light():
+                        continue
+
+                    lightObj = light()
+                    sceneState = self.lightstates.get(lightObj)
+
+                    # GroupScene.lights contains every lamp in the room.
+                    # Only lamps represented by the scene actions may
+                    # participate in dynamic playback.
+                    if sceneState is None:
+                        continue
+
+                    # Hue uses an explicit on:false action when a lamp is
+                    # disabled in the scene editor. Stop any previous dynamic
+                    # playback for that lamp and honour the saved OFF state.
+                    if sceneState.get("on") is False:
+                        if (
+                            lightObj.dynamics["status"]
+                            == "dynamic_palette"
+                        ):
+                            lightObj.dynamics["status"] = "none"
+
+                        lightObj.setV1State(
+                            {"on": False}
+                        )
+                        continue
+
+                    lightObj.dynamics["speed"] = self.speed
+
+                    Thread(
+                        target=lightObj.dynamicScenePlay,
+                        args=[
+                            self.palette,
+                            lightIndex,
+                        ],
+                    ).start()
+
+                    # Offset only participating lights. Excluded/off lamps
+                    # must not consume a palette position.
+                    lightIndex += 1
+
                 return
             elif data["recall"]["action"] == "deactivate":
                 self.status = "inactive"

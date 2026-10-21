@@ -147,7 +147,7 @@ def githubInstall() -> None:
     Install updates from GitHub if they are ready to be installed.
     """
     if bridgeConfig["config"]["swupdate2"]["state"] in ["allreadytoinstall", "anyreadytoinstall"]:
-        subprocess.Popen(f"sh githubInstall.sh {bridgeConfig['config']['ipaddress']} {bridgeConfig['config']['swupdate2']['state']}", shell=True, close_fds=True)
+        print("Automatic diyHue self-update disabled")
         bridgeConfig["config"]["swupdate2"]["state"] = "installing"
 
 def startupCheck() -> None:

@@ -189,9 +189,13 @@ def checkBehaviorInstances(device):
                 if buttonAction in instance.configuration["buttons"][button]:
                     if "time_based" in instance.configuration["buttons"][button][buttonAction]:
                         any_on = False
-                        for resource in instance.configuration["where"]:
+                        button_cfg = instance.configuration["buttons"][button]
+                        where = button_cfg.get("where", instance.configuration.get("where", []))
+                        for resource in where:
                             if "group" in resource:
                                 group = findGroup(resource["group"]["rid"], resource["group"]["rtype"])
+                                if group is None:
+                                    continue
                                 if group.update_state()["any_on"] == True:
                                     any_on = True
                                     group.setV1Action({"on": False})
@@ -207,9 +211,13 @@ def checkBehaviorInstances(device):
                     elif "scene_cycle" in instance.configuration["buttons"][button][buttonAction]:
                         callScene(random.choice(instance.configuration["buttons"][button][buttonAction]["scene_cycle"])[0]["action"]["recall"]["rid"])
                     elif "action" in instance.configuration["buttons"][button][buttonAction]:
-                        for resource in instance.configuration["where"]:
+                        button_cfg = instance.configuration["buttons"][button]
+                        where = button_cfg.get("where", instance.configuration.get("where", []))
+                        for resource in where:
                             if "group" in resource:
                                 group = findGroup(resource["group"]["rid"], resource["group"]["rtype"])
+                                if group is None:
+                                    continue
                                 if instance.configuration["buttons"][button][buttonAction]["action"] == "all_off":
                                     group.setV1Action({"on": False})
                                 elif instance.configuration["buttons"][button][buttonAction]["action"] == "dim_up":
