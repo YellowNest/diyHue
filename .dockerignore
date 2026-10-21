@@ -1,0 +1,9 @@
+**
+!BridgeEmulator/**/*.py
+!BridgeEmulator/*.py
+!BridgeEmulator/genCert.sh
+!BridgeEmulator/openssl.conf
+!.build/Dockerfile.holken
+!runtime-source-sha256.json
+BridgeEmulator/config/**
+**/__pycache__/**

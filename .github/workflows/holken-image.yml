@@ -1,0 +1,66 @@
+name: Validate holken image
+
+on:
+  push:
+    branches: [holken]
+  workflow_dispatch:
+    inputs:
+      publish_candidate:
+        description: Publish the tested commit image (does not promote stable)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  arm64:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify source and syntax
+        run: |
+          python -m unittest discover -s tests -v
+          python -m compileall -q BridgeEmulator
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the Raspberry Pi image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .build/Dockerfile.holken
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: diyhue-holken:test
+          build-args: SOURCE_REVISION=${{ github.sha }}
+      - name: Check packaged source and dependencies without network access
+        run: |
+          docker run --rm --network none --entrypoint python3 diyhue-holken:test -c '
+          import hashlib, importlib.metadata, json, pathlib
+          root = pathlib.Path("/opt/hue-emulator")
+          for name, digest in json.loads((root / "runtime-source-sha256.json").read_text()).items():
+              assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest, name
+          for name in ("Flask", "Flask-RESTful", "PyYAML", "paho-mqtt", "zeroconf"):
+              print(name, importlib.metadata.version(name))
+          '
+      - name: Authenticate to GHCR for an explicitly requested candidate
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_candidate
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish immutable candidate; stable promotion is a separate operation
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_candidate
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          docker tag diyhue-holken:test ghcr.io/yellownest/diyhue-holken:sha-${REVISION}
+          docker push ghcr.io/yellownest/diyhue-holken:sha-${REVISION}

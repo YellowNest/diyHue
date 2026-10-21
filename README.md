@@ -239,3 +239,9 @@ Hue living color light project for 3D printing: [Thingiverse 2773413](https://ww
 ## License
 
 [![license](https://img.shields.io/badge/license-GPLv3%2FApache%202.0%2FCC%20BY--SA%204.0-blue.svg)](https://github.com/diyhue/diyHue/blob/master/LICENSE.md)
+# holken production branch
+
+This branch contains the verified holken application source. Read
+[HOLKEN.md](HOLKEN.md) before building or deploying. Runtime data and credentials
+are deliberately excluded. Upstream tracking branches are `master` and `dev`.
+

@@ -1,0 +1,11 @@
+# Preserve the verified runtime dependencies and bundled Web UI while making
+# all Python application code part of the replaceable image.
+FROM diyhue/core@sha256:37304b0560e587ad18123a9efc356e68d965acfe4f93e5a355589eaaa743b700
+
+ARG SOURCE_REVISION=uncommitted
+LABEL org.opencontainers.image.source="https://github.com/YellowNest/diyHue" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.description="Verified holken runtime; persistent data belongs in /opt/hue-emulator/config"
+
+COPY BridgeEmulator/ /opt/hue-emulator/
+COPY runtime-source-sha256.json /opt/hue-emulator/
