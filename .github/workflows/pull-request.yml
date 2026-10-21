@@ -22,6 +22,10 @@ jobs:
         run: |
           docker build -t diyhue/core:ci -f ./.build/Dockerfile --platform=${{ matrix.arch }} --build-arg TARGETPLATFORM=${{ matrix.arch }} .
 
+      - name: Run Python regression tests without network access
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp --mount type=bind,src="$PWD",dst=/src,readonly --workdir /tmp --entrypoint python3 diyhue/core:ci -B -m unittest discover -s /src/tests -v
+
       - name: Run docker image
         run: |
           docker run -d --name diyHue --network=host -v /mnt/hue-emulator/export:/opt/hue-emulator/export -e MAC=b8:27:eb:d4:dc:11 -e IP=192.168.1.123 -e DECONZ=192.168.1.111 -e IP_RANGE=5,6 -e DEBUG=true diyhue/core:ci
