@@ -142,13 +142,6 @@ def main():
             shutdown_mqtt_publishers()
         except Exception as e:
             logging.error("MQTT shutdown failed: %s", e)
-        # The process exits with os._exit(), which bypasses atexit handlers.
-        # Stop MQTT producers and drain the publisher before saving/exiting.
-        try:
-            from lights.protocols.mqtt import shutdown_mqtt_publishers
-            shutdown_mqtt_publishers()
-        except Exception as e:
-            logging.error("MQTT shutdown failed: %s", e)
         # Full save — catches everything including undirtied background mutations.
         # blocking=True ensures we wait if restore/reset is in progress.
         try:
