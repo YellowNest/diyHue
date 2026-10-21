@@ -72,6 +72,8 @@ class MqttSensorDiscoveryTests(unittest.TestCase):
         functions_rules.rulesProcessor = Mock()
         functions_behavior = types.ModuleType("functions.behavior_instance")
         functions_behavior.checkBehaviorInstances = Mock()
+        functions_motion = types.ModuleType("functions.motionAware")
+        functions_motion.updateMotionAwareOccupancySensor = Mock()
 
         sensors = package("sensors")
         sensors_discover = types.ModuleType("sensors.discover")
@@ -102,6 +104,7 @@ class MqttSensorDiscoveryTests(unittest.TestCase):
             "functions.core": functions_core,
             "functions.rules": functions_rules,
             "functions.behavior_instance": functions_behavior,
+            "functions.motionAware": functions_motion,
             "sensors": sensors,
             "sensors.discover": sensors_discover,
             "sensors.sensor_types": sensors_types,
