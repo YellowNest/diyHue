@@ -15,7 +15,7 @@
   "HueObjects/__init__.py": "a229077bd2882b53963364360f37898f5a80fdf1a6d32fa1c2b795797ceac89c",
   "configManager/__init__.py": "5be84ff2f9839b2f47a8738075e9eeec49aa5dcbb2fc827b837e96493c493051",
   "configManager/argumentHandler.py": "13bcb28b4573162450203fb925ffd8b442971051780890a5547951f7e7621932",
-  "configManager/configHandler.py": "1bb1c054795927b642a1be30ca413ffb58c76f350447f6ada020ca5afb80ed1a",
+  "configManager/configHandler.py": "17871fa066f646af110bc3eec1991fee57c76d515bb3484e9ffdaa84735e7aa8",
   "configManager/configInit.py": "b6945cec05f484304942e345629cf38e17365d265403e867c47b542e3d6c685e",
   "configManager/runtimeConfigHandler.py": "77931269491d5e870864f6ed6fae839597c28158a8ebcf00487b27ebd891efd7",
   "flaskUI/Credits.py": "ee97279ce914407e868775cb556ca34becf4aca5d003e3849b224cb15364238c",

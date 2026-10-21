@@ -324,7 +324,14 @@ class Config:
                         logging.error(f"Skipping corrupt light {light}: {e}")
         #groups
         #create group 0
-        self.yaml_config["groups"]["0"] = Group.Group({"name":"Group 0","id_v1": "0","type":"LightGroup","state":{"all_on":False,"any_on":True},"recycle":False,"action":{"on":False,"bri":165,"hue":8418,"sat":140,"effect":"none","xy":[0.6635,0.2825],"ct":366,"alert":"select","colormode":"hs"}})
+        # Group 0 is synthetic and omitted from groups.yaml; retain its public V2 identity.
+        self.yaml_config["groups"]["0"] = Group.Group({
+            "name": "Group 0", "id_v1": "0",
+            "id_v2": self.yaml_config["config"].setdefault("group_zero_id_v2", str(uuid.uuid4())),
+            "type": "LightGroup", "state": {"all_on": False, "any_on": True}, "recycle": False,
+            "action": {"on": False, "bri": 165, "hue": 8418, "sat": 140, "effect": "none",
+                       "xy": [0.6635, 0.2825], "ct": 366, "alert": "select", "colormode": "hs"}
+        })
         for key, light in self.yaml_config["lights"].items():
             self.yaml_config["groups"]["0"].add_light(light)
         # create groups
